@@ -144,7 +144,7 @@ type
 
 implementation
 
-{ TSessionBeanContainer }
+{$REGION 'TSessionBeanContainer'}
 
 constructor TSessionBeanContainer.Create();
 begin
@@ -263,7 +263,10 @@ begin
   lIdentity := TIdentityHelper.Make(TypeInfo(T));
 
   if TryGetSingleton(lIdentity, lBean) then
+  begin
+    Result := lBean.Unwrap<T>();
     Exit;
+  end;
 
   raise ESingletonNotFoundException.Create(lIdentity);
 end;
@@ -276,7 +279,11 @@ begin
   lIdentity := TIdentityHelper.Make(TypeInfo(T), Qualifier);
 
   if TryGetSingleton(lIdentity, lBean) then
+  begin
+    Result := lBean.Unwrap<T>();
     Exit;
+  end;
+
 
   raise ESingletonNotFoundException.Create(lIdentity);
 end;
@@ -320,7 +327,9 @@ begin
   inherited;
 end;
 
-{ TIdentity }
+{$ENDREGION}
+
+{$REGION 'TIdentityHelper'}
 
 class function TIdentityHelper.Make(const TypeInfo: PTypeInfo; const Qualifier: String): String;
 begin
@@ -332,7 +341,9 @@ begin
   Result := String(TypeInfo.Name);
 end;
 
-{ TSingletonBeanContainerHolder }
+{$ENDREGION}
+
+{$REGION 'TSingletonBeanContainerHolder'}
 
 class constructor TSingletonBeanContainerHolder.Initialize();
 begin
@@ -351,7 +362,9 @@ begin
   _SingletonBeanContainer := nil;
 end;
 
-{ TBean }
+{$ENDREGION}
+
+{$REGION 'TBean'}
 
 constructor TBean.Wrap(const Value: TValue);
 begin
@@ -365,6 +378,7 @@ function TBean.Unwrap<T>(): T;
 var
   lCastedValue: TValue;
   lUnwrapTypeInfo, lBeanTypeInfo: PTypeInfo;
+  lBeanTypeName, lUnwrapTypeName: String;
 begin
   lBeanTypeInfo := FValue.TypeInfo;
   lUnwrapTypeInfo := TypeInfo(T);
@@ -375,10 +389,19 @@ begin
     Exit;
   end;
 
+  lBeanTypeName := String(lBeanTypeInfo.Name);
+  lUnwrapTypeName := String(lUnwrapTypeInfo.Name);
+
   if lUnwrapTypeInfo.Kind = tkInterface then
   begin
-    Supports(FValue.AsInterface, GetTypeData(lUnwrapTypeInfo).GUID, Result);
-    Exit;
+    if Supports(FValue.AsInterface,
+                GetTypeData(lUnwrapTypeInfo).GUID,
+                Result) then
+      Exit;
+
+     raise EBeanException.CreateFmt(
+            'Failed to unwrap bean. "%s" does not supports "%s"',
+            [lBeanTypeName, lUnwrapTypeName]);
   end;
 
   if lUnwrapTypeInfo.Kind = tkClass then
@@ -393,9 +416,6 @@ begin
     except
       on Ex: Exception do
       begin
-        var lBeanTypeName := String(lUnwrapTypeInfo.Name);
-        var lUnwrapTypeName := String(lUnwrapTypeInfo.Name);
-
         if Ex is EInvalidCast then
           raise EBeanException.CreateFmt(
             'Failed to unwrap bean. Could not cast "%s" into "%s"',
@@ -416,7 +436,9 @@ begin
   Dest.Close();
 end;
 
-{ TBeanFactoryContext }
+{$ENDREGION}
+
+{$Region 'TBeanFactoryContext'}
 
 function TBeanFactoryContext.Any<T>(): T;
 begin
@@ -438,7 +460,9 @@ begin
   FBeanContainer := BeanContainer;
 end;
 
-{ TIoCRegistry }
+{$ENDREGION}
+
+{$REGION 'TIoCRegistry'}
 
 class constructor TIoCRegistry.Initialize();
 begin
@@ -450,6 +474,7 @@ begin
   Result := _DefaultBeanFactory;
 end;
 
+{$WARN NO_RETVAL OFF}
 class function TIoCRegistry.RegisterBeanFactory<T>(Callback: TBeanFactoryCallback): TIoCRegistry;
 var
   lIdentity: String;
@@ -465,13 +490,16 @@ begin
   lIdentity := TIdentityHelper.Make(TypeInfo(T), Qualifier);
   (_DefaultBeanFactory as TCallbackBeanFactory).RegisterCallback(lIdentity, Callback);
 end;
+{$WARN NO_RETVAL ON}
 
 class destructor TIoCRegistry.Unitialize();
 begin
   _DefaultBeanFactory := nil;
 end;
 
-{ TCallbackBeanFactory }
+{$ENDREGION}
+
+{$REGION 'TCallbackBeanFactory'}
 
 constructor TCallbackBeanFactory.Create();
 begin
@@ -501,5 +529,7 @@ procedure TCallbackBeanFactory.RegisterCallback(const Identity: String; Callback
 begin
   FBeanFactoryCallbackTable.AddOrSetValue(Identity, Callback);
 end;
+
+{$ENDREGION}
 
 end.
