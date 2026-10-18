@@ -106,7 +106,7 @@ Called: TConnectionProvider.Create
 Called: TProductRepository.Create
 Total de produtos: 1000
 Called: TProductRepository.Destroy
-Called: TConnectionProvider.Create   <- destructor
+Called: TConnectionProvider.Destroy  <- destructor
 ```
 
 ---
