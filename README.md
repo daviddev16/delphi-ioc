@@ -2,6 +2,22 @@
 
 Uma biblioteca leve de **Inversão de Controle (IoC)** e **Injeção de Dependência (DI)** para Delphi, baseada em um modelo de fábrica com callbacks e suporte a três escopos de ciclo de vida de beans.
 
+## Introdução
+
+A premissa central do delphi-ioc é que tanto a **criação** quanto a **definição de escopo** das dependências sejam transparentes para quem consome o container.
+
+Na maioria das bibliotecas de IoC, o container age como um catálogo de objetos vivos: instâncias são criadas, armazenadas na memória e entregues ao chamador. O delphi-ioc inverte esse ponto de vista. Em vez de gerenciar objetos em memória de forma opaca, você **define o fluxo de criação** — ou seja, registra callbacks que descrevem *como* cada dependência deve ser construída e *quais* outras dependências ela precisa. O container executa esse fluxo somente quando necessário, de acordo com o escopo solicitado.
+
+Isso tem algumas consequências práticas importantes:
+
+**A construção permanece no seu código.** O `new` (ou `Create`, em Delphi) nunca desaparece; ele continua explícito dentro do callback de fábrica, onde você tem controle total sobre os parâmetros, condicionais e tratamento de erros da criação.
+
+**O escopo é uma decisão do chamador, não do objeto.** Uma mesma factory pode produzir um bean scoped em um contexto e transient em outro. O objeto em si não sabe — e não precisa saber — qual é o seu ciclo de vida.
+
+**Não há mágica por reflexão ou atributos.** O registro é feito em código puro, sem varredura de assemblies, sem atributos de injeção e sem convenções implícitas. O que está escrito é o que acontece.
+
+O resultado é um container que serve como **organizador de dependências** — não como um framework que assume o controle da construção dos seus objetos.
+
 ---
 
 ## Sumário
