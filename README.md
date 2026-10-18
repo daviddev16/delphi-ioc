@@ -302,6 +302,18 @@ TIoCRegistry.RegisterBeanFactory<IServicoDeNegocio>(
 
 ---
 
+## Recursos Futuros
+
+- **`IBeanFactory` via RTTI:** uma implementação alternativa de `IBeanFactory` que usa reflexão para instanciar beans automaticamente, inspecionando construtores e resolvendo parâmetros pelo tipo. Mantém a compatibilidade com o modelo atual de callbacks — os dois podem coexistir — mas elimina o boilerplate de registro para casos onde a convenção é suficiente.
+
+- **Logger de diagnóstico:** suporte a `ILogger` no container para registrar eventos de criação e recuperação de beans por escopo. Útil para entender a ordem de resolução das dependências, identificar beans criados mais vezes do que o esperado e rastrear o ciclo de vida durante o desenvolvimento.
+
+- **Resolução por tipo base ou classe ancestral:** atualmente a identidade de um bean é derivada do `TypeInfo` exato usado na chamada. Isso significa que registrar uma factory para `IProductRepository` e resolver via `TAbstractProductRepository` — mesmo que seja uma atribuição válida em tempo de compilação — resultará em erro, pois as identidades são distintas. Um mecanismo de resolução por compatibilidade de tipo está planejado para cobrir esses cenários.
+
+- **Detecção de dependência circular:** verificação em tempo de resolução do grafo de dependências para identificar ciclos antes que causem estouro de pilha. A ideia é rastrear a cadeia de criação ativa durante um `CreateBean` e lançar uma exceção descritiva ao detectar que um tipo já está sendo construído na mesma cadeia.
+
+---
+
 ## Licença
 
 Veja o arquivo [LICENSE](LICENSE).
