@@ -3,8 +3,10 @@ unit IoC;
 interface
 
 uses
+  IoC.Proxy,
   System.Rtti,
   System.TypInfo,
+  System.SyncObjs,
   System.Generics.Collections,
   System.SysUtils;
 
@@ -19,10 +21,9 @@ type
   TSessionBeanContainer = class;
   TSingletonBeanContainerHolder = class;
   IBeanFactory = interface;
-  TBeanFactoryContext = class;
 
   TBeanValue = TValue;
-  TBeanFactoryCallback = reference to function(Ctx: TBeanFactoryContext): TBeanValue;
+  TBeanFactoryCallback<T> = reference to function(Ctx: T): TBeanValue;
 
   TIdentityHelper = record
     public
@@ -38,14 +39,37 @@ type
       FValue: TValue;
     public
       function Unwrap<T>(): T;
+      function GetTypeInfo(): PTypeInfo;
       procedure Close();
       constructor Wrap(const Value: TValue);
       class operator Finalize(var Dest: TBean);
+      property Value: TValue read FValue;
     end;
 
-  ILogger = interface
-    procedure Debug(const Message: String);
-  end;
+  TAbstractBeanFactoryContext = class abstract
+    strict private
+      FBeanContainer: TSessionBeanContainer;
+    public
+      constructor Create(const BeanContainer: TSessionBeanContainer);
+    protected
+      property Container: TSessionBeanContainer read FBeanContainer;
+    end;
+
+  TSingletonBeanFactoryContext = class(TAbstractBeanFactoryContext)
+    public
+      function Singleton<T>(): T;
+    end;
+
+  TSingletonBeanFactoryCallback = TBeanFactoryCallback<TSingletonBeanFactoryContext>;
+
+  TScopedBeanFactoryContext = class(TAbstractBeanFactoryContext)
+    public
+      function Singleton<T>(): T;
+      function Scoped<T>(): T;
+      function Transient<T>(): T;
+    end;
+
+  TScopedBeanFactoryCallback = TBeanFactoryCallback<TScopedBeanFactoryContext>;
 
   ISingletonBeanContainer = interface
     ['{AF7AF191-9441-4F82-BCF7-D09519713F9B}']
@@ -54,30 +78,21 @@ type
 
   IBeanFactory = interface
     ['{3D007D34-4060-4B81-A24B-3BFE1E36AAA8}']
-    function CreateBean(const Context: TBeanFactoryContext; const Identity: String): TBean;
+    function CreateBean(
+      const Identity: String;
+      const Ctx: TScopedBeanFactoryContext): TBean;
+
+    function CreateSingletonBean(
+      const Identity: String;
+      const Ctx: TSingletonBeanFactoryContext): TBean;
   end;
 
   IBeanContainer = interface(ISingletonBeanContainer)
     ['{BFD58202-8239-4CFE-9AE2-B4CEB625BE2E}']
     function TryGetScoped(const Identity: String; out Bean: TBean): Boolean;
-    function TryGetTransient(const Identity: String; out Bean: TBean): Boolean;
     function TryGetAny(const Identity: String; out Bean: TBean): Boolean;
+    function TryInjectScoped(const Identity: String; const Bean: TBean): Boolean;
   end;
-
-  //
-  // Allows parts of IBeanContainer implementation to be accessible from
-  // callback factory function.
-  //
-  TBeanFactoryContext = class
-    strict private
-      FBeanContainer: TSessionBeanContainer;
-    public
-      function AnyScoped<T>(): T;
-      function AnySingleton<T>(): T;
-      function Any<T>(): T;
-    public
-      constructor Create(const BeanContainer: TSessionBeanContainer);
-    end;
 
   TSessionBeanContainer = class(TInterfacedObject, IBeanContainer)
     type
@@ -85,49 +100,99 @@ type
     strict private
       FBeanFactory: IBeanFactory;
       FScopedTable: TBeanHashTable;
-      FTransientTable: TBeanHashTable;
-      FBeanFactoryContext: TBeanFactoryContext;
     protected // internal interfaces
       function TryGetScoped(const Identity: String; out Bean: TBean): Boolean;
-      function TryGetTransient(const Identity: String; out Bean: TBean): Boolean;
       function TryGetSingleton(const Identity: String; out Bean: TBean): Boolean;
       function TryGetAny(const Identity: String; out Bean: TBean): Boolean;
+      function TryInjectScoped(const Identity: String; const Bean: TBean): Boolean;
     public // public interfaces
       function GetScoped<T>(): T; overload;
       function GetScoped<T>(const Qualifier: String): T; overload;
-      function GetAny<T>(): T; overload;
-      function GetAny<T>(const Qualifier: String): T; overload;
       function GetSingleton<T>(): T; overload;
       function GetSingleton<T>(const Qualifier: String): T; overload;
       function GetTransient<T>(): T; overload;
       function GetTransient<T>(const Qualifier: String): T; overload;
+      procedure InjectScoped<T>(const Qualifier: String; const Thing: T);
     public
       constructor Create(); overload;
       constructor Create(const BeanFactory: IBeanFactory); overload;
       destructor Destroy(); override;
     end;
 
-  TCallbackBeanFactory = class(TInterfacedObject, IBeanFactory)
-    type
-      TBeanFactoryCallbackHashTable = TDictionary<String, TBeanFactoryCallback>;
-    strict private
-      FBeanFactoryCallbackTable: TBeanFactoryCallbackHashTable;
+  TBeanFactoryDefinition<C> = record
+    private
+      Interceptors: TArray<IInterceptor>;
+      Callback: C;
+      Qualifier: String;
+      TypeInfo: PTypeInfo;
     public
-      procedure RegisterCallback(const Identity: String; Callback: TBeanFactoryCallback);
-      function CreateBean(const Context: TBeanFactoryContext; const Identity: String): TBean;
+      function HasInterception(): Boolean;
+    end;
+
+  TCallbackBeanFactory = class(TInterfacedObject, IBeanFactory)
+    strict private
+      FScopedBeanFactoryDefinitions: TDictionary<String,
+        TBeanFactoryDefinition<TScopedBeanFactoryCallback>>;
+
+      FSingletonBeanFactoryDefinitions: TDictionary<String,
+        TBeanFactoryDefinition<TSingletonBeanFactoryCallback>>;
+    public
+      procedure RegisterScopedBeanFactoryCallback(
+          const Identity: String;
+          const Definition: TBeanFactoryDefinition<TScopedBeanFactoryCallback>);
+
+      procedure RegisterSingletonBeanFactoryCallback(
+          const Identity: String;
+          const Definition: TBeanFactoryDefinition<TSingletonBeanFactoryCallback>);
+
+      function CreateBean(
+        const Identity: String;
+        const Ctx: TScopedBeanFactoryContext): TBean;
+
+      function CreateSingletonBean(
+        const Identity: String;
+        const Ctx: TSingletonBeanFactoryContext): TBean;
     public
       constructor Create();
       destructor Destroy(); override;
+    end;
+
+  TBeanFactoryProxifier = class
+    public
+      class procedure ProxyBean(
+        const WrappedBean: TBean;
+        const Interceptors: TArray<IInterceptor>;
+        const InterfaceTypeInfo: PTypeInfo;
+        out ProxifiedBean: TBean);
     end;
 
   TIoCRegistry = class
     strict private
       class var _DefaultBeanFactory: IBeanFactory;
     public
-      class function RegisterBeanFactory<T>(const Qualifier: String; Callback: TBeanFactoryCallback): TIoCRegistry;
-        overload;
-      class function RegisterBeanFactory<T>(Callback: TBeanFactoryCallback): TIoCRegistry;
-        overload;
+      class function RegisterScopedBeanFactory<T>(
+        Callback: TScopedBeanFactoryCallback): TIoCRegistry; overload;
+
+      class function RegisterScopedBeanFactory<T>(
+        const Qualifier: String;
+        Callback: TScopedBeanFactoryCallback): TIoCRegistry; overload;
+
+      class function RegisterScopedBeanFactory<T>(
+        const Qualifier: String;
+        Callback: TScopedBeanFactoryCallback;
+        const Interceptors: TArray<IInterceptor>): TIoCRegistry; overload;
+
+      class function RegisterScopedBeanFactory<T>(
+        Callback: TScopedBeanFactoryCallback;
+        const Interceptors: TArray<IInterceptor>): TIoCRegistry; overload;
+
+      class function RegisterSingletonBeanFactory<T>(
+        Callback: TSingletonBeanFactoryCallback): TIoCRegistry; overload;
+
+      class function RegisterSingletonBeanFactory<T>(
+        const Qualifier: String;
+        Callback: TSingletonBeanFactoryCallback): TIoCRegistry; overload;
+
       class function GetDefaultBeanFactory(): IBeanFactory;
       class constructor Initialize();
       class destructor Unitialize();
@@ -135,7 +200,8 @@ type
 
   TSingletonBeanContainerHolder = class
     strict private
-      class var _SingletonBeanContainer: IBeanContainer;
+      class var _SingletonLock: TMREWSync;
+      class var _SingletonBeanContainer: TSessionBeanContainer;
     public
       class function TryGetSingleton(const Identity: String; out Bean: TBean): Boolean;
       class constructor Initialize();
@@ -154,8 +220,6 @@ end;
 constructor TSessionBeanContainer.Create(const BeanFactory: IBeanFactory);
 begin
   FScopedTable := TBeanHashTable.Create();
-  FTransientTable := TBeanHashTable.Create();
-  FBeanFactoryContext := TBeanFactoryContext.Create(Self);
   FBeanFactory := BeanFactory;
 end;
 
@@ -163,61 +227,49 @@ function TSessionBeanContainer.GetScoped<T>(): T;
 var
   lBean: TBean;
   lIdentity: String;
+  lBeanFactoryContext: TScopedBeanFactoryContext;
 begin
   lIdentity := TIdentityHelper.Make(TypeInfo(T));
 
   if not TryGetScoped(lIdentity, lBean) then
   begin
-    lBean := FBeanFactory.CreateBean(FBeanFactoryContext, lIdentity);
-    FScopedTable.AddOrSetValue(lIdentity, lBean);
+    lBeanFactoryContext := TScopedBeanFactoryContext.Create(Self);
+    try
+      lBean := FBeanFactory.CreateBean(lIdentity, lBeanFactoryContext);
+      FScopedTable.AddOrSetValue(lIdentity, lBean);
+    finally
+      lBeanFactoryContext.Free();
+    end;
   end;
 
   Result := lBean.Unwrap<T>();
 end;
 
-function TSessionBeanContainer.GetAny<T>(const Qualifier: String): T;
+procedure TSessionBeanContainer.InjectScoped<T>(const Qualifier: String; const Thing: T);
 var
-  lBean: TBean;
   lIdentity: String;
 begin
   lIdentity := TIdentityHelper.Make(TypeInfo(T), Qualifier);
-
-  if not TryGetAny(lIdentity, lBean) then
-  begin
-    lBean := FBeanFactory.CreateBean(FBeanFactoryContext, lIdentity);
-    FTransientTable.AddOrSetValue(lIdentity, lBean);
-  end;
-
-  Result := lBean.Unwrap<T>();
-end;
-
-function TSessionBeanContainer.GetAny<T>(): T;
-var
-  lBean: TBean;
-  lIdentity: String;
-begin
-  lIdentity := TIdentityHelper.Make(TypeInfo(T));
-
-  if not TryGetAny(lIdentity, lBean) then
-  begin
-    lBean := FBeanFactory.CreateBean(FBeanFactoryContext, lIdentity);
-    FTransientTable.AddOrSetValue(lIdentity, lBean);
-  end;
-
-  Result := lBean.Unwrap<T>();
+  TryInjectScoped(lIdentity, TBean.Wrap(TValue.From<T>(Thing)));
 end;
 
 function TSessionBeanContainer.GetScoped<T>(const Qualifier: String): T;
 var
   lBean: TBean;
   lIdentity: String;
+  lBeanFactoryContext: TScopedBeanFactoryContext;
 begin
   lIdentity := TIdentityHelper.Make(TypeInfo(T), Qualifier);
 
   if not TryGetScoped(lIdentity, lBean) then
   begin
-    lBean := FBeanFactory.CreateBean(FBeanFactoryContext, lIdentity);
-    FScopedTable.AddOrSetValue(lIdentity, lBean);
+    lBeanFactoryContext := TScopedBeanFactoryContext.Create(Self);
+    try
+      lBean := FBeanFactory.CreateBean(lIdentity, lBeanFactoryContext);
+      FScopedTable.AddOrSetValue(lIdentity, lBean);
+    finally
+      lBeanFactoryContext.Free();
+    end;
   end;
 
   Result := lBean.Unwrap<T>();
@@ -227,32 +279,34 @@ function TSessionBeanContainer.GetTransient<T>(): T;
 var
   lBean: TBean;
   lIdentity: String;
+  lBeanFactoryContext: TScopedBeanFactoryContext;
 begin
   lIdentity := TIdentityHelper.Make(TypeInfo(T));
 
-  if not TryGetTransient(lIdentity, lBean) then
-  begin
-    lBean := FBeanFactory.CreateBean(FBeanFactoryContext, lIdentity);
-    FTransientTable.AddOrSetValue(lIdentity, lBean);
+  lBeanFactoryContext := TScopedBeanFactoryContext.Create(Self);
+  try
+    lBean := FBeanFactory.CreateBean(lIdentity, lBeanFactoryContext);
+    Result := lBean.Unwrap<T>();
+  finally
+    lBeanFactoryContext.Free();
   end;
-
-  Result := lBean.Unwrap<T>();
 end;
 
 function TSessionBeanContainer.GetTransient<T>(const Qualifier: String): T;
 var
   lBean: TBean;
   lIdentity: String;
+  lBeanFactoryContext: TScopedBeanFactoryContext;
 begin
   lIdentity := TIdentityHelper.Make(TypeInfo(T), Qualifier);
 
-  if not TryGetTransient(lIdentity, lBean) then
-  begin
-    lBean := FBeanFactory.CreateBean(FBeanFactoryContext, lIdentity);
-    FTransientTable.AddOrSetValue(lIdentity, lBean);
+  lBeanFactoryContext := TScopedBeanFactoryContext.Create(Self);
+  try
+    lBean := FBeanFactory.CreateBean(lIdentity, lBeanFactoryContext);
+    Result := lBean.Unwrap<T>();
+  finally
+    lBeanFactoryContext.Free();
   end;
-
-  Result := lBean.Unwrap<T>();
 end;
 
 function TSessionBeanContainer.GetSingleton<T>(): T;
@@ -288,14 +342,17 @@ begin
   raise ESingletonNotFoundException.Create(lIdentity);
 end;
 
+function TSessionBeanContainer.TryInjectScoped(const Identity: String; const Bean: TBean): Boolean;
+begin
+  FScopedTable.AddOrSetValue(Identity, Bean);
+  Result := True;
+end;
+
 function TSessionBeanContainer.TryGetAny(const Identity: String; out Bean: TBean): Boolean;
 begin
   Result := True;
 
   if TryGetScoped(Identity, Bean) then
-    Exit;
-
-  if TryGetTransient(Identity, Bean) then
     Exit;
 
   if TryGetSingleton(Identity, Bean) then
@@ -314,16 +371,9 @@ begin
   Result := TSingletonBeanContainerHolder.TryGetSingleton(Identity,Bean);
 end;
 
-function TSessionBeanContainer.TryGetTransient(const Identity: String; out Bean: TBean): Boolean;
-begin
-  Result := FTransientTable.TryGetValue(Identity, Bean);
-end;
-
 destructor TSessionBeanContainer.Destroy();
 begin
   FreeAndNil(FScopedTable);
-  FreeAndNil(FTransientTable);
-  FreeAndNil(FBeanFactoryContext);
   inherited;
 end;
 
@@ -353,13 +403,43 @@ end;
 class function TSingletonBeanContainerHolder.TryGetSingleton(
   const Identity: String;
   out Bean: TBean): Boolean;
+var
+  lBeanFactoryContext: TSingletonBeanFactoryContext;
 begin
-  Result := _SingletonBeanContainer.TryGetScoped(Identity, Bean);
+  _SingletonLock.BeginRead();
+  try
+    if _SingletonBeanContainer.TryGetScoped(Identity, Bean) then
+    begin
+      Result := True;
+      Exit;
+    end;
+  finally
+    _SingletonLock.EndRead();
+  end;
+
+  _SingletonLock.BeginWrite();
+  try
+    if _SingletonBeanContainer.TryGetScoped(Identity, Bean) then
+    begin
+      Result := True;
+      Exit;
+    end;
+
+    lBeanFactoryContext := TSingletonBeanFactoryContext.Create(_SingletonBeanContainer);
+    try
+      Bean := TIoCRegistry.GetDefaultBeanFactory().CreateSingletonBean(Identity, lBeanFactoryContext);
+      Result := _SingletonBeanContainer.TryInjectScoped(Identity, Bean);
+    finally
+      lBeanFactoryContext.Free();
+    end;
+  finally
+    _SingletonLock.EndWrite();
+  end;
 end;
 
 class destructor TSingletonBeanContainerHolder.Unitialize();
 begin
-  _SingletonBeanContainer := nil;
+  FreeAndNil(_SingletonBeanContainer);
 end;
 
 {$ENDREGION}
@@ -385,7 +465,7 @@ begin
 
   if lUnwrapTypeInfo = lBeanTypeInfo then
   begin
-    FValue.ExtractRawDataNoCopy(@Result);
+    FValue.ExtractRawData(@Result);
     Exit;
   end;
 
@@ -412,7 +492,7 @@ begin
       if lCastedValue.IsEmpty then
         raise EInvalidCast.Create('casted to Empty value.');
 
-      lCastedValue.ExtractRawDataNoCopy(@Result);
+      lCastedValue.ExtractRawData(@Result);
     except
       on Ex: Exception do
       begin
@@ -431,33 +511,14 @@ end;
 procedure TBean.Close();
 begin { future } end;
 
+function TBean.GetTypeInfo(): PTypeInfo;
+begin
+  Result := FValue.TypeInfo;
+end;
+
 class operator TBean.Finalize(var Dest: TBean);
 begin
   Dest.Close();
-end;
-
-{$ENDREGION}
-
-{$Region 'TBeanFactoryContext'}
-
-function TBeanFactoryContext.Any<T>(): T;
-begin
-  Result := FBeanContainer.GetAny<T>();
-end;
-
-function TBeanFactoryContext.AnyScoped<T>(): T;
-begin
-  Result := FBeanContainer.GetScoped<T>();
-end;
-
-function TBeanFactoryContext.AnySingleton<T>(): T;
-begin
-  Result := FBeanContainer.GetSingleton<T>();
-end;
-
-constructor TBeanFactoryContext.Create(const BeanContainer: TSessionBeanContainer);
-begin
-  FBeanContainer := BeanContainer;
 end;
 
 {$ENDREGION}
@@ -475,21 +536,114 @@ begin
 end;
 
 {$WARN NO_RETVAL OFF}
-class function TIoCRegistry.RegisterBeanFactory<T>(Callback: TBeanFactoryCallback): TIoCRegistry;
-var
-  lIdentity: String;
-begin
-  lIdentity := TIdentityHelper.Make(TypeInfo(T));
-  (_DefaultBeanFactory as TCallbackBeanFactory).RegisterCallback(lIdentity, Callback);
-end;
 
-class function TIoCRegistry.RegisterBeanFactory<T>(const Qualifier: String; Callback: TBeanFactoryCallback): TIoCRegistry;
+class function TIoCRegistry.RegisterSingletonBeanFactory<T>(
+  const Qualifier: String;
+  Callback: TSingletonBeanFactoryCallback): TIoCRegistry;
 var
   lIdentity: String;
+  lDefinition: TBeanFactoryDefinition<TSingletonBeanFactoryCallback>;
 begin
   lIdentity := TIdentityHelper.Make(TypeInfo(T), Qualifier);
-  (_DefaultBeanFactory as TCallbackBeanFactory).RegisterCallback(lIdentity, Callback);
+
+  lDefinition.Interceptors := [];
+  lDefinition.Callback := Callback;
+  lDefinition.Qualifier := Qualifier;
+  lDefinition.TypeInfo := TypeInfo(T);
+
+  (_DefaultBeanFactory as TCallbackBeanFactory)
+      .RegisterSingletonBeanFactoryCallback(lIdentity, lDefinition);
 end;
+
+class function TIoCRegistry.RegisterSingletonBeanFactory<T>(
+  Callback: TSingletonBeanFactoryCallback): TIoCRegistry;
+var
+  lIdentity: String;
+  lDefinition: TBeanFactoryDefinition<TSingletonBeanFactoryCallback>;
+begin
+  lIdentity := TIdentityHelper.Make(TypeInfo(T));
+
+  lDefinition.Interceptors := [];
+  lDefinition.Callback := Callback;
+  lDefinition.Qualifier := EmptyStr;
+  lDefinition.TypeInfo := TypeInfo(T);
+
+  (_DefaultBeanFactory as TCallbackBeanFactory)
+      .RegisterSingletonBeanFactoryCallback(lIdentity, lDefinition);
+end;
+
+class function TIoCRegistry.RegisterScopedBeanFactory<T>(
+  const Qualifier: String;
+  Callback: TScopedBeanFactoryCallback): TIoCRegistry;
+var
+  lIdentity: String;
+  lDefinition: TBeanFactoryDefinition<TScopedBeanFactoryCallback>;
+begin
+  lIdentity := TIdentityHelper.Make(TypeInfo(T), Qualifier);
+
+  lDefinition.Interceptors := [];
+  lDefinition.Callback := Callback;
+  lDefinition.Qualifier := Qualifier;
+  lDefinition.TypeInfo := TypeInfo(T);
+
+  (_DefaultBeanFactory as TCallbackBeanFactory)
+      .RegisterScopedBeanFactoryCallback(lIdentity, lDefinition);
+end;
+
+class function TIoCRegistry.RegisterScopedBeanFactory<T>(
+  Callback: TScopedBeanFactoryCallback): TIoCRegistry;
+var
+  lIdentity: String;
+  lDefinition: TBeanFactoryDefinition<TScopedBeanFactoryCallback>;
+begin
+  lIdentity := TIdentityHelper.Make(TypeInfo(T));
+
+  lDefinition.Interceptors := [];
+  lDefinition.Callback := Callback;
+  lDefinition.Qualifier := EmptyStr;
+  lDefinition.TypeInfo := TypeInfo(T);
+
+  (_DefaultBeanFactory as TCallbackBeanFactory)
+      .RegisterScopedBeanFactoryCallback(lIdentity, lDefinition);
+end;
+
+class function TIoCRegistry.RegisterScopedBeanFactory<T>(
+  Callback: TScopedBeanFactoryCallback;
+  const Interceptors: TArray<IInterceptor>): TIoCRegistry;
+var
+  lIdentity: String;
+  lDefinition: TBeanFactoryDefinition<TScopedBeanFactoryCallback>;
+begin
+  lIdentity := TIdentityHelper.Make(TypeInfo(T));
+
+  lDefinition.Interceptors := Interceptors;
+  lDefinition.Callback := Callback;
+  lDefinition.Qualifier := EmptyStr;
+  lDefinition.TypeInfo := TypeInfo(T);
+
+  (_DefaultBeanFactory as TCallbackBeanFactory)
+      .RegisterScopedBeanFactoryCallback(lIdentity, lDefinition);
+end;
+
+class function TIoCRegistry.RegisterScopedBeanFactory<T>(
+  const Qualifier: String;
+  Callback: TScopedBeanFactoryCallback;
+  const Interceptors: TArray<IInterceptor>): TIoCRegistry;
+var
+  lIdentity: String;
+  lDefinition: TBeanFactoryDefinition<TScopedBeanFactoryCallback>;
+begin
+  lIdentity := TIdentityHelper.Make(TypeInfo(T));
+
+  lDefinition.Interceptors := Interceptors;
+  lDefinition.Callback := Callback;
+  lDefinition.Qualifier := Qualifier;
+  lDefinition.TypeInfo := TypeInfo(T);
+
+  (_DefaultBeanFactory as TCallbackBeanFactory)
+      .RegisterScopedBeanFactoryCallback(lIdentity, lDefinition);
+end;
+
 {$WARN NO_RETVAL ON}
 
 class destructor TIoCRegistry.Unitialize();
@@ -503,33 +657,137 @@ end;
 
 constructor TCallbackBeanFactory.Create();
 begin
-  FBeanFactoryCallbackTable := TBeanFactoryCallbackHashTable.Create();
+  FScopedBeanFactoryDefinitions :=
+    TDictionary<String, TBeanFactoryDefinition<TScopedBeanFactoryCallback>>.Create();
+
+  FSingletonBeanFactoryDefinitions :=
+    TDictionary<String, TBeanFactoryDefinition<TSingletonBeanFactoryCallback>>.Create();
 end;
 
-function TCallbackBeanFactory.CreateBean(const Context: TBeanFactoryContext; const Identity: String): TBean;
+function TCallbackBeanFactory.CreateBean(const Identity: String; const Ctx: TScopedBeanFactoryContext): TBean;
 var
-  lCallback: TBeanFactoryCallback;
+  lInstantiatedBean: TBean;
+  lDefinition: TBeanFactoryDefinition<TScopedBeanFactoryCallback>;
 begin
-  if FBeanFactoryCallbackTable.TryGetValue(Identity, lCallback) then
+  if not FScopedBeanFactoryDefinitions.TryGetValue(Identity, lDefinition) then
+    raise EBeanException.CreateFmt('Failed to create bean. Unable to resolve a callback for : %s', [Identity]);
+
+
+  lInstantiatedBean := TBean.Wrap(lDefinition.Callback(Ctx));
+
+  if not lDefinition.HasInterception() then
   begin
-    Result := TBean.Wrap(lCallback(Context));
+    Result := lInstantiatedBean;
     Exit;
   end;
 
-  raise EBeanException.CreateFmt('Failed to create bean. Unable to resolve a callback for : %s', [Identity]);
+  try
+    TBeanFactoryProxifier.ProxyBean(lInstantiatedBean, lDefinition.Interceptors, lDefinition.TypeInfo, Result);
+  except
+    lInstantiatedBean.Close();
+    raise;
+  end;
+end;
+
+function TCallbackBeanFactory.CreateSingletonBean(const Identity: String; const Ctx: TSingletonBeanFactoryContext): TBean;
+var
+  lInstantiatedBean: TBean;
+  lDefinition: TBeanFactoryDefinition<TSingletonBeanFactoryCallback>;
+begin
+  if not FSingletonBeanFactoryDefinitions.TryGetValue(Identity, lDefinition) then
+    raise EBeanException.CreateFmt('Failed to create singleton bean. Unable to resolve a callback for : %s', [Identity]);
+
+  lInstantiatedBean := TBean.Wrap(lDefinition.Callback(Ctx));
+
+  if not lDefinition.HasInterception() then
+  begin
+    Result := lInstantiatedBean;
+    Exit;
+  end;
+
+  try
+    TBeanFactoryProxifier.ProxyBean(lInstantiatedBean, lDefinition.Interceptors, lDefinition.TypeInfo, Result);
+  except
+    lInstantiatedBean.Close();
+    raise;
+  end;
+end;
+
+procedure TCallbackBeanFactory.RegisterScopedBeanFactoryCallback(
+  const Identity: String;
+  const Definition: TBeanFactoryDefinition<TScopedBeanFactoryCallback>);
+begin
+  FScopedBeanFactoryDefinitions.AddOrSetValue(Identity, Definition);
+end;
+
+procedure TCallbackBeanFactory.RegisterSingletonBeanFactoryCallback(
+  const Identity: String;
+  const Definition: TBeanFactoryDefinition<TSingletonBeanFactoryCallback>);
+begin
+  FSingletonBeanFactoryDefinitions.AddOrSetValue(Identity, Definition);
 end;
 
 destructor TCallbackBeanFactory.Destroy();
 begin
-  FreeAndNil(FBeanFactoryCallbackTable);
+  FreeAndNil(FScopedBeanFactoryDefinitions);
+  FreeAndNil(FSingletonBeanFactoryDefinitions);
   inherited;
 end;
 
-procedure TCallbackBeanFactory.RegisterCallback(const Identity: String; Callback: TBeanFactoryCallback);
+{$ENDREGION}
+
+{ TAbstractBeanFactoryContext }
+
+constructor TAbstractBeanFactoryContext.Create(const BeanContainer: TSessionBeanContainer);
 begin
-  FBeanFactoryCallbackTable.AddOrSetValue(Identity, Callback);
+  FBeanContainer := BeanContainer;
 end;
 
-{$ENDREGION}
+{ TScopedBeanFactoryContext }
+
+function TScopedBeanFactoryContext.Scoped<T>(): T;
+begin
+  Result := Container.GetScoped<T>();
+end;
+
+function TScopedBeanFactoryContext.Singleton<T>(): T;
+begin
+  Result := Container.GetSingleton<T>();
+end;
+
+function TScopedBeanFactoryContext.Transient<T>(): T;
+begin
+  Result := Container.GetTransient<T>();
+end;
+
+{ TSingletonBeanFactoryContext }
+
+function TSingletonBeanFactoryContext.Singleton<T>(): T;
+begin
+  Result := Container.GetSingleton<T>();
+end;
+
+
+{ TBeanFactoryDefinition<C> }
+
+function TBeanFactoryDefinition<C>.HasInterception(): Boolean;
+begin
+  Result := Length(Interceptors) > 0;
+end;
+
+{ TBeanFactoryProxifier }
+
+class procedure TBeanFactoryProxifier.ProxyBean(
+  const WrappedBean: TBean;
+  const Interceptors: TArray<IInterceptor>;
+  const InterfaceTypeInfo: PTypeInfo;
+  out ProxifiedBean: TBean);
+var
+  lProxyIntf: TValue;
+begin
+  lProxyIntf := WrappedBean.Value.Cast(InterfaceTypeInfo, False);
+  lProxyIntf := TProxy.CreateProxyFor(lProxyIntf, InterfaceTypeInfo, Interceptors);
+  ProxifiedBean := TBean.Wrap(lProxyIntf);
+end;
 
 end.
